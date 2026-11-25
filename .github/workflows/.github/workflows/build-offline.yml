@@ -1,0 +1,330 @@
+name: Build Offline AI TTS
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Create Offline TTS Project
+        run: |
+          mkdir -p app/libs app/src/main/java/com/ingarsir/geminitts app/src/main/res/xml
+          curl -L -o app/libs/sherpa-onnx-2.0.3.aar "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.3/sherpa-onnx-2.0.3.aar"
+          cat << 'EOF' > settings.gradle.kts
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement {
+            repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+            repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "OfflineMultiLangTTS"
+          include(":app")
+          EOF
+          cat << 'EOF' > gradle.properties
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          EOF
+          cat << 'EOF' > build.gradle.kts
+          plugins {
+            id("com.android.application") version "8.5.2" apply false
+            id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          cat << 'EOF' > app/build.gradle.kts
+          plugins {
+            id("com.android.application")
+            id("org.jetbrains.kotlin.android")
+          }
+          android {
+            namespace = "com.ingarsir.geminitts"
+            compileSdk = 34
+            defaultConfig {
+              applicationId = "com.ingarsir.geminitts"
+              minSdk = 24
+              targetSdk = 34
+              versionCode = 5
+              versionName = "2.0"
+              ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
+            }
+            packaging { jniLibs { useLegacyPackaging = true } }
+            compileOptions {
+              sourceCompatibility = JavaVersion.VERSION_17
+              targetCompatibility = JavaVersion.VERSION_17
+            }
+            kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+            implementation(files("libs/sherpa-onnx-2.0.3.aar"))
+            implementation("androidx.core:core-ktx:1.13.1")
+            implementation("androidx.appcompat:appcompat:1.7.0")
+          }
+          EOF
+          cat << 'EOF' > app/src/main/res/xml/tts_engine.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <tts-engine xmlns:android="http://schemas.android.com/apk/res/android" android:settingsActivity="com.ingarsir.geminitts.MainActivity" />
+          EOF
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.INTERNET" />
+            <application android:allowBackup="true" android:label="Offline Multi-Lang TTS" android:supportsRtl="true" android:theme="@style/Theme.AppCompat.Light.DarkActionBar">
+              <activity android:name=".MainActivity" android:exported="true">
+                <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+              </activity>
+              <activity android:name=".CheckVoiceDataActivity" android:exported="true" android:theme="@android:style/Theme.NoDisplay">
+                <intent-filter><action android:name="android.speech.tts.engine.CHECK_TTS_DATA" /><category android:name="android.intent.category.DEFAULT" /></intent-filter>
+                <intent-filter><action android:name="android.speech.tts.engine.GET_SAMPLE_TEXT" /><category android:name="android.intent.category.DEFAULT" /></intent-filter>
+              </activity>
+              <service android:name=".GeminiTtsService" android:exported="true" android:label="Offline Multi-Lang TTS">
+                <intent-filter><action android:name="android.speech.tts.TextToSpeechService" /><action android:name="android.intent.action.TTS_SERVICE" /><category android:name="android.intent.category.DEFAULT" /></intent-filter>
+                <meta-data android:name="android.speech.tts" android:resource="@xml/tts_engine" />
+              </service>
+            </application>
+          </manifest>
+          EOF
+          cat << 'EOF' > app/src/main/java/com/ingarsir/geminitts/CheckVoiceDataActivity.kt
+          package com.ingarsir.geminitts
+          import android.app.Activity
+          import android.content.Intent
+          import android.os.Bundle
+          import android.speech.tts.TextToSpeech
+          class CheckVoiceDataActivity : Activity() {
+            override fun onCreate(savedInstanceState: Bundle?) {
+              super.onCreate(savedInstanceState)
+              val res = Intent()
+              if (intent?.action == TextToSpeech.Engine.ACTION_GET_SAMPLE_TEXT) {
+                val lang = intent.getStringExtra("language") ?: "gu"
+                val sample = when (lang.lowercase()) {
+                  "gu", "guj" -> "નમસ્તે, આ ઑફલાઇન મલ્ટી-લેંગ્વેજ ટીટીએસ છે."
+                  "hi", "hin" -> "नमस्ते, यह ऑफलाइन मल्टी-लैंग्वेज टीटीएस है।"
+                  "sa", "san" -> "नमस्ते, एषा बहुभाषा वाणी अस्ति।"
+                  else -> "Hello, this is Offline Multi-Language TTS."
+                }
+                res.putExtra(TextToSpeech.Engine.EXTRA_SAMPLE_TEXT, sample)
+                setResult(RESULT_OK, res)
+              } else {
+                res.putStringArrayListExtra(TextToSpeech.Engine.EXTRA_AVAILABLE_VOICES, arrayListOf("guj-IND","hin-IND","san-IND","eng-IND","eng-USA","eng-GBR"))
+                res.putStringArrayListExtra(TextToSpeech.Engine.EXTRA_UNAVAILABLE_VOICES, arrayListOf())
+                setResult(TextToSpeech.Engine.CHECK_VOICE_DATA_PASS, res)
+              }
+              finish()
+            }
+          }
+          EOF
+          cat << 'EOF' > app/src/main/java/com/ingarsir/geminitts/GeminiTtsService.kt
+          package com.ingarsir.geminitts
+          import android.media.AudioFormat
+          import android.speech.tts.*
+          import com.k2fsa.sherpa.onnx.*
+          import java.io.ByteArrayOutputStream
+          import java.io.File
+          import java.util.Locale
+          import java.util.concurrent.ConcurrentHashMap
+          import java.util.concurrent.CountDownLatch
+          import java.util.concurrent.TimeUnit
+          class GeminiTtsService : TextToSpeechService() {
+            @Volatile private var isStopped = false
+            @Volatile private var fallbackReady = false
+            private var fallbackTts: TextToSpeech? = null
+            private val engines = ConcurrentHashMap<String, OfflineTts>()
+            private val voices = listOf(
+              Voice("offline-gu-in", Locale("gu","IN"), Voice.QUALITY_VERY_HIGH, Voice.LATENCY_NORMAL, false, emptySet()),
+              Voice("offline-hi-in", Locale("hi","IN"), Voice.QUALITY_VERY_HIGH, Voice.LATENCY_NORMAL, false, emptySet()),
+              Voice("offline-sa-in", Locale("sa","IN"), Voice.QUALITY_VERY_HIGH, Voice.LATENCY_NORMAL, false, emptySet()),
+              Voice("offline-en-in", Locale("en","IN"), Voice.QUALITY_VERY_HIGH, Voice.LATENCY_NORMAL, false, emptySet()),
+              Voice("offline-en-us", Locale.US, Voice.QUALITY_VERY_HIGH, Voice.LATENCY_NORMAL, false, emptySet())
+            )
+            override fun onCreate() {
+              super.onCreate()
+              fallbackTts = TextToSpeech(this, { fallbackReady = (it == TextToSpeech.SUCCESS) }, "com.google.android.tts")
+            }
+            override fun onDestroy() {
+              engines.values.forEach { it.release() }
+              engines.clear()
+              fallbackTts?.stop(); fallbackTts?.shutdown()
+              super.onDestroy()
+            }
+            override fun onGetVoices(): List<Voice> = voices
+            override fun onIsValidVoiceName(v: String?) = TextToSpeech.SUCCESS
+            override fun onLoadVoice(v: String?) = TextToSpeech.SUCCESS
+            override fun onGetDefaultVoiceNameFor(l: String?, c: String?, v: String?) = when (l?.lowercase()) {
+              "gu","guj" -> "offline-gu-in"; "hi","hin" -> "offline-hi-in"; "sa","san" -> "offline-sa-in"; else -> "offline-en-in"
+            }
+            override fun onIsLanguageAvailable(l: String?, c: String?, v: String?) = when (l?.lowercase()) {
+              "gu","guj","hi","hin","sa","san","en","eng" -> TextToSpeech.LANG_COUNTRY_VAR_AVAILABLE
+              else -> TextToSpeech.LANG_AVAILABLE
+            }
+            override fun onGetLanguage() = arrayOf("guj", "IND", "")
+            override fun onLoadLanguage(l: String?, c: String?, v: String?) = onIsLanguageAvailable(l, c, v)
+            override fun onStop() { isStopped = true; fallbackTts?.stop() }
+            private fun getEngine(lang: String): OfflineTts? {
+              engines[lang]?.let { return it }
+              val dir = File(filesDir, "models/$lang")
+              val m = File(dir, "model.onnx"); val t = File(dir, "tokens.txt")
+              if (!m.exists() || !t.exists() || m.length() < 1000000L) return null
+              return try {
+                val cfg = OfflineTtsConfig(model = OfflineTtsModelConfig(vits = OfflineTtsVitsModelConfig(model = m.absolutePath, tokens = t.absolutePath), numThreads = 2, provider = "cpu"))
+                OfflineTts(null, cfg).also { engines[lang] = it }
+              } catch (_: Exception) { null }
+            }
+            private fun segmentText(text: String, reqLang: String?): List<Pair<String, String>> {
+              val out = mutableListOf<Pair<String, String>>()
+              var curLang: String? = null; val buf = StringBuilder()
+              val defaultDev = if (reqLang?.lowercase() in listOf("sa", "san")) "san" else "hin"
+              for (ch in text) {
+                val l = when {
+                  ch in '\u0A80'..'\u0AFF' -> "guj"
+                  ch in '\u0900'..'\u097F' -> defaultDev
+                  ch in 'A'..'Z' || ch in 'a'..'z' -> "eng"
+                  else -> null
+                }
+                if (l != null && curLang != null && l != curLang) {
+                  val s = buf.toString().trim()
+                  if (s.isNotEmpty()) out.add(curLang to s)
+                  buf.clear(); curLang = l
+                } else if (l != null && curLang == null) curLang = l
+                buf.append(ch)
+              }
+              val s = buf.toString().trim()
+              if (s.isNotEmpty()) out.add((curLang ?: "eng") to s)
+              return out.map { (lang, seg) ->
+                if (lang == "hin" && (seg.contains("ः") || seg.contains("ऽ") || seg.contains("ॐ") || seg.contains("म्"))) "san" to seg else lang to seg
+              }
+            }
+            private fun speakFallback(txt: String, cb: SynthesisCallback): Boolean {
+              val engine = fallbackTts
+              if (!fallbackReady || engine == null) return false
+              val wavFile = File(cacheDir, "fb_${System.nanoTime()}.wav")
+              try {
+                engine.language = when {
+                  txt.any { it in '\u0A80'..'\u0AFF' } -> Locale("gu", "IN")
+                  txt.any { it in '\u0900'..'\u097F' } -> Locale("hi", "IN")
+                  else -> Locale("en", "IN")
+                }
+                val latch = CountDownLatch(1); var ok = false; val uttId = "fb_${System.nanoTime()}"
+                engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                  override fun onStart(id: String?) {}
+                  override fun onDone(id: String?) { if (id == uttId) { ok = true; latch.countDown() } }
+                  override fun onError(id: String?) { if (id == uttId) latch.countDown() }
+                })
+                if (engine.synthesizeToFile(txt, null, wavFile, uttId) != TextToSpeech.SUCCESS) return false
+                latch.await(8, TimeUnit.SECONDS)
+                if (!ok || !wavFile.exists() || wavFile.length() <= 44 || isStopped) return false
+                val bytes = wavFile.readBytes()
+                val sr = (bytes[24].toInt() and 0xFF) or ((bytes[25].toInt() and 0xFF) shl 8) or ((bytes[26].toInt() and 0xFF) shl 16) or ((bytes[27].toInt() and 0xFF) shl 24)
+                var dataIdx = 44
+                for (i in 12 until minOf(bytes.size - 8, 256)) {
+                  if (bytes[i] == 'd'.code.toByte() && bytes[i+1] == 'a'.code.toByte() && bytes[i+2] == 't'.code.toByte() && bytes[i+3] == 'a'.code.toByte()) { dataIdx = i + 8; break }
+                }
+                cb.start(if (sr in 8000..48000) sr else 24000, AudioFormat.ENCODING_PCM_16BIT, 1)
+                val maxB = cb.maxBufferSize; var off = dataIdx
+                while (off < bytes.size && !isStopped) { val len = minOf(maxB, bytes.size - off); cb.audioAvailable(bytes, off, len); off += len }
+                if (!isStopped) cb.done()
+                return true
+              } catch (_: Exception) { return false } finally { wavFile.delete() }
+            }
+            override fun onSynthesizeText(req: SynthesisRequest?, cb: SynthesisCallback?) {
+              if (req == null || cb == null) return
+              isStopped = false
+              val txt = req.charSequenceText?.toString()?.trim() ?: ""
+              if (txt.isEmpty()) { cb.start(16000, AudioFormat.ENCODING_PCM_16BIT, 1); cb.done(); return }
+              val segs = segmentText(txt, req.language)
+              val speed = (req.speechRate / 100f).coerceIn(0.5f, 2.0f)
+              val allMissing = segs.all { getEngine(it.first) == null }
+              if (allMissing) { if (!speakFallback(txt, cb)) cb.error(); return }
+              try {
+                val pcmOut = ByteArrayOutputStream()
+                var outRate = 16000
+                for ((lang, seg) in segs) {
+                  if (isStopped) return
+                  val eng = getEngine(lang) ?: continue
+                  val cleanSeg = if (lang == "eng") seg.lowercase() else seg
+                  val audio = eng.generate(cleanSeg, 0, speed)
+                  outRate = audio.sampleRate
+                  for (s in audio.samples) {
+                    val v = (s.coerceIn(-1f, 1f) * 32767f).toInt().toShort()
+                    pcmOut.write(v.toInt() and 0xFF)
+                    pcmOut.write((v.toInt() shr 8) and 0xFF)
+                  }
+                }
+                val pcm = pcmOut.toByteArray()
+                if (pcm.isEmpty()) { if (!speakFallback(txt, cb)) cb.error(); return }
+                cb.start(outRate, AudioFormat.ENCODING_PCM_16BIT, 1)
+                val maxB = cb.maxBufferSize; var off = 0
+                while (off < pcm.size && !isStopped) { val len = minOf(maxB, pcm.size - off); cb.audioAvailable(pcm, off, len); off += len }
+                if (!isStopped) cb.done()
+              } catch (_: Exception) { if (!speakFallback(txt, cb)) cb.error() }
+            }
+          }
+          EOF
+          cat << 'EOF' > app/src/main/java/com/ingarsir/geminitts/MainActivity.kt
+          package com.ingarsir.geminitts
+          import android.content.Intent
+          import android.os.Bundle
+          import android.speech.tts.TextToSpeech
+          import android.widget.*
+          import androidx.appcompat.app.AppCompatActivity
+          import java.io.File
+          import java.net.URL
+          import java.util.Locale
+          class MainActivity : AppCompatActivity() {
+            private var tts: TextToSpeech? = null
+            private lateinit var statusTv: TextView
+            private val langs = listOf("guj" to "Gujarati", "hin" to "Hindi", "san" to "Sanskrit", "eng" to "English")
+            override fun onCreate(savedInstanceState: Bundle?) {
+              super.onCreate(savedInstanceState)
+              val layout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(48,48,48,48) }
+              layout.addView(TextView(this).apply { text = "Offline Multi-Lang AI TTS v2.0"; textSize = 22f })
+              statusTv = TextView(this).apply { setPadding(0,16,0,16) }
+              layout.addView(statusTv)
+              updateStatus("Ready")
+              val dlBtn = Button(this).apply {
+                text = "Download All 4 Offline AI Voices"
+                setOnClickListener {
+                  isEnabled = false
+                  Thread {
+                    for ((code, name) in langs) {
+                      runOnUiThread { updateStatus("Downloading $name...") }
+                      try {
+                        val dir = File(filesDir, "models/$code").apply { mkdirs() }
+                        val base = "https://huggingface.co/Symmetris-labs/tts-mms/resolve/main/$code"
+                        if (!File(dir, "tokens.txt").exists()) URL("$base/tokens.txt").openStream().use { i -> File(dir, "tokens.txt").outputStream().use { o -> i.copyTo(o) } }
+                        if (!File(dir, "model.onnx").exists() || File(dir, "model.onnx").length() < 1000000L) URL("$base/model.onnx").openStream().use { i -> File(dir, "model.onnx").outputStream().use { o -> i.copyTo(o) } }
+                      } catch (e: Exception) {
+                        runOnUiThread { updateStatus("Error ($name): ${e.message}") }
+                      }
+                    }
+                    runOnUiThread { isEnabled = true; updateStatus("All 4 Offline Voices Ready!") }
+                  }.start()
+                }
+              }
+              layout.addView(dlBtn)
+              val testIn = EditText(this).apply { setText("નમસ્તે મિત્રો! आज हम चार भाषाएँ सुनेंगे। Welcome! विद्या ददाति विनयम्।") }
+              layout.addView(testIn)
+              layout.addView(Button(this).apply { text = "Test Speak Now"; setOnClickListener { tts?.speak(testIn.text.toString(), TextToSpeech.QUEUE_FLUSH, null, "t1") } })
+              layout.addView(Button(this).apply { text = "Open Default TTS Settings"; setOnClickListener { startActivity(Intent("com.android.settings.TTS_SETTINGS")) } })
+              setContentView(ScrollView(this).apply { addView(layout) })
+              tts = TextToSpeech(this, { if (it == TextToSpeech.SUCCESS) tts?.language = Locale("gu","IN") }, packageName)
+            }
+            private fun updateStatus(msg: String) {
+              val ready = langs.filter { File(filesDir, "models/${it.first}/model.onnx").length() > 1000000L }.joinToString { it.second }
+              statusTv.text = "Installed: ${if (ready.isEmpty()) "None yet" else ready}\nStatus: $msg"
+            }
+            override fun onDestroy() { tts?.stop(); tts?.shutdown(); super.onDestroy() }
+          }
+          EOF
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-multilang-tts-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          
