@@ -1,0 +1,252 @@
+name: Build TTS v3
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Create Project
+        run: |
+          mkdir -p app/src/main/java/com/ingarsir/geminitts app/src/main/res/xml
+          cat << 'EOF' > settings.gradle.kts
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement {
+            repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+            repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "GeminiMultiLangTTS"
+          include(":app")
+          EOF
+          cat << 'EOF' > gradle.properties
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          EOF
+          cat << 'EOF' > build.gradle.kts
+          plugins {
+            id("com.android.application") version "8.5.2" apply false
+            id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          cat << 'EOF' > app/build.gradle.kts
+          plugins {
+            id("com.android.application")
+            id("org.jetbrains.kotlin.android")
+          }
+          android {
+            namespace = "com.ingarsir.geminitts"
+            compileSdk = 34
+            defaultConfig {
+              applicationId = "com.ingarsir.geminitts"
+              minSdk = 24
+              targetSdk = 34
+              versionCode = 3
+              versionName = "1.2"
+            }
+            compileOptions {
+              sourceCompatibility = JavaVersion.VERSION_17
+              targetCompatibility = JavaVersion.VERSION_17
+            }
+            kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+            implementation("androidx.core:core-ktx:1.13.1")
+            implementation("androidx.appcompat:appcompat:1.7.0")
+          }
+          EOF
+          cat << 'EOF' > app/src/main/res/xml/tts_engine.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <tts-engine xmlns:android="http://schemas.android.com/apk/res/android" android:settingsActivity="com.ingarsir.geminitts.MainActivity" />
+          EOF
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.INTERNET" />
+            <application android:allowBackup="true" android:label="Gemini Multi-Lang TTS" android:supportsRtl="true" android:theme="@style/Theme.AppCompat.Light.DarkActionBar">
+              <activity android:name=".MainActivity" android:exported="true">
+                <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+              </activity>
+              <activity android:name=".CheckVoiceDataActivity" android:exported="true" android:theme="@android:style/Theme.NoDisplay">
+                <intent-filter><action android:name="android.speech.tts.engine.CHECK_TTS_DATA" /><category android:name="android.intent.category.DEFAULT" /></intent-filter>
+                <intent-filter><action android:name="android.speech.tts.engine.GET_SAMPLE_TEXT" /><category android:name="android.intent.category.DEFAULT" /></intent-filter>
+              </activity>
+              <service android:name=".GeminiTtsService" android:exported="true" android:label="Gemini Multi-Lang TTS">
+                <intent-filter><action android:name="android.speech.tts.TextToSpeechService" /><action android:name="android.intent.action.TTS_SERVICE" /><category android:name="android.intent.category.DEFAULT" /></intent-filter>
+                <meta-data android:name="android.speech.tts" android:resource="@xml/tts_engine" />
+              </service>
+            </application>
+          </manifest>
+          EOF
+          cat << 'EOF' > app/src/main/java/com/ingarsir/geminitts/CheckVoiceDataActivity.kt
+          package com.ingarsir.geminitts
+          import android.app.Activity
+          import android.content.Intent
+          import android.os.Bundle
+          import android.speech.tts.TextToSpeech
+          class CheckVoiceDataActivity : Activity() {
+            override fun onCreate(savedInstanceState: Bundle?) {
+              super.onCreate(savedInstanceState)
+              val res = Intent()
+              if (intent?.action == TextToSpeech.Engine.ACTION_GET_SAMPLE_TEXT) {
+                val lang = intent.getStringExtra("language") ?: "gu"
+                val sample = when (lang.lowercase()) {
+                  "gu", "guj" -> "નમસ્તે, આ જેમિની મલ્ટી-લેંગ્વેજ ટીટીએસ છે."
+                  "hi", "hin" -> "नमस्ते, यह जेमिनी मल्टी-लैंग्वेज टीटीएस है।"
+                  "sa", "san" -> "नमस्ते, एषा जेमिनी बहुभाषा वाणी अस्ति।"
+                  else -> "Hello, this is Gemini Multi-Language TTS."
+                }
+                res.putExtra(TextToSpeech.Engine.EXTRA_SAMPLE_TEXT, sample)
+                setResult(RESULT_OK, res)
+              } else {
+                res.putStringArrayListExtra(TextToSpeech.Engine.EXTRA_AVAILABLE_VOICES, arrayListOf("guj-IND","hin-IND","san-IND","eng-IND","eng-USA","eng-GBR"))
+                res.putStringArrayListExtra(TextToSpeech.Engine.EXTRA_UNAVAILABLE_VOICES, arrayListOf())
+                setResult(TextToSpeech.Engine.CHECK_VOICE_DATA_PASS, res)
+              }
+              finish()
+            }
+          }
+          EOF
+          cat << 'EOF' > app/src/main/java/com/ingarsir/geminitts/GeminiTtsService.kt
+          package com.ingarsir.geminitts
+          import android.content.Context
+          import android.media.AudioFormat
+          import android.speech.tts.*
+          import android.util.Base64
+          import org.json.*
+          import java.io.*
+          import java.net.*
+          import java.util.Locale
+          class GeminiTtsService : TextToSpeechService() {
+            @Volatile private var isStopped = false
+            private val voices = listOf(
+              Voice("gemini-gu-in", Locale("gu","IN"), Voice.QUALITY_VERY_HIGH, Voice.LATENCY_NORMAL, false, emptySet()),
+              Voice("gemini-hi-in", Locale("hi","IN"), Voice.QUALITY_VERY_HIGH, Voice.LATENCY_NORMAL, false, emptySet()),
+              Voice("gemini-sa-in", Locale("sa","IN"), Voice.QUALITY_VERY_HIGH, Voice.LATENCY_NORMAL, false, emptySet()),
+              Voice("gemini-en-in", Locale("en","IN"), Voice.QUALITY_VERY_HIGH, Voice.LATENCY_NORMAL, false, emptySet()),
+              Voice("gemini-en-us", Locale.US, Voice.QUALITY_VERY_HIGH, Voice.LATENCY_NORMAL, false, emptySet()),
+              Voice("gemini-en-gb", Locale.UK, Voice.QUALITY_VERY_HIGH, Voice.LATENCY_NORMAL, false, emptySet())
+            )
+            override fun onGetVoices(): List<Voice> = voices
+            override fun onIsValidVoiceName(v: String?) = TextToSpeech.SUCCESS
+            override fun onLoadVoice(v: String?) = TextToSpeech.SUCCESS
+            override fun onGetDefaultVoiceNameFor(l: String?, c: String?, v: String?) = when (l?.lowercase()) {
+              "gu","guj" -> "gemini-gu-in"; "hi","hin" -> "gemini-hi-in"; "sa","san" -> "gemini-sa-in"; else -> "gemini-en-in"
+            }
+            override fun onIsLanguageAvailable(l: String?, c: String?, v: String?) = when (l?.lowercase()) {
+              "gu","guj","hi","hin","sa","san","en","eng" -> TextToSpeech.LANG_COUNTRY_VAR_AVAILABLE
+              else -> TextToSpeech.LANG_AVAILABLE
+            }
+            override fun onGetLanguage() = arrayOf("guj", "IND", "")
+            override fun onLoadLanguage(l: String?, c: String?, v: String?) = onIsLanguageAvailable(l, c, v)
+            override fun onStop() { isStopped = true }
+            override fun onSynthesizeText(req: SynthesisRequest?, cb: SynthesisCallback?) {
+              if (req == null || cb == null) return
+              isStopped = false
+              val txt = req.charSequenceText?.toString()?.trim() ?: ""
+              if (txt.isEmpty()) { cb.start(24000, AudioFormat.ENCODING_PCM_16BIT, 1); cb.done(); return }
+              val prefs = getSharedPreferences("gemini_tts_prefs", Context.MODE_PRIVATE)
+              val key = prefs.getString("api_key", "")?.trim() ?: ""
+              val vName = prefs.getString("voice_name", "Kore") ?: "Kore"
+              val mName = prefs.getString("model_name", "gemini-3.8-flash-lite-tts") ?: "gemini-3.8-flash-lite-tts"
+              if (key.isEmpty()) { prefs.edit().putString("last_error", "API Key empty").apply(); cb.error(); return }
+              try {
+                val conn = (URL("https://generativelanguage.googleapis.com/v1beta/models/$mName:generateContent?key=$key").openConnection() as HttpURLConnection).apply {
+                  requestMethod = "POST"; setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+                  connectTimeout = 10000; readTimeout = 25000; doOutput = true
+                }
+                val prompt = "Read aloud naturally and fluently without awkward pauses on punctuation, automatically matching Gujarati, Hindi, Sanskrit, or English: $txt"
+                val payload = JSONObject().put("contents", JSONArray().put(JSONObject().put("parts", JSONArray().put(JSONObject().put("text", prompt)))))
+                  .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("AUDIO"))
+                    .put("speechConfig", JSONObject().put("voiceConfig", JSONObject().put("prebuiltVoiceConfig", JSONObject().put("voiceName", vName)))))
+                OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(payload.toString()); it.flush() }
+                if (isStopped) return
+                if (conn.responseCode !in 200..299) {
+                  val e = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: "HTTP ${conn.responseCode}"
+                  prefs.edit().putString("last_error", e.take(180)).apply(); cb.error(); return
+                }
+                val res = BufferedReader(InputStreamReader(conn.inputStream)).use { it.readText() }
+                val parts = JSONObject(res).getJSONArray("candidates").getJSONObject(0).getJSONObject("content").getJSONArray("parts")
+                var b64: String? = null
+                for (i in 0 until parts.length()) {
+                  val p = parts.getJSONObject(i)
+                  if (p.has("inlineData")) { b64 = p.getJSONObject("inlineData").getString("data"); break }
+                }
+                if (b64 == null) { prefs.edit().putString("last_error", "No audio").apply(); cb.error(); return }
+                val raw = Base64.decode(b64, Base64.DEFAULT)
+                val pcm = if (raw.size > 44 && raw[0] == 'R'.code.toByte() && raw[1] == 'I'.code.toByte() && raw[2] == 'F'.code.toByte() && raw[3] == 'F'.code.toByte()) raw.copyOfRange(44, raw.size) else raw
+                if (isStopped) return
+                cb.start(24000, AudioFormat.ENCODING_PCM_16BIT, 1)
+                val maxB = cb.maxBufferSize; var off = 0
+                while (off < pcm.size && !isStopped) {
+                  val len = minOf(maxB, pcm.size - off); cb.audioAvailable(pcm, off, len); off += len
+                }
+                if (!isStopped) { prefs.edit().putString("last_error", "OK").apply(); cb.done() }
+              } catch (e: Exception) {
+                prefs.edit().putString("last_error", e.message ?: "Err").apply(); cb.error()
+              }
+            }
+          }
+          EOF
+          cat << 'EOF' > app/src/main/java/com/ingarsir/geminitts/MainActivity.kt
+          package com.ingarsir.geminitts
+          import android.content.*
+          import android.os.Bundle
+          import android.speech.tts.TextToSpeech
+          import android.widget.*
+          import androidx.appcompat.app.AppCompatActivity
+          import java.util.Locale
+          class MainActivity : AppCompatActivity() {
+            private var tts: TextToSpeech? = null
+            override fun onCreate(savedInstanceState: Bundle?) {
+              super.onCreate(savedInstanceState)
+              val prefs = getSharedPreferences("gemini_tts_prefs", Context.MODE_PRIVATE)
+              val layout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(48,48,48,48) }
+              layout.addView(TextView(this).apply { text = "Gemini Multi-Lang TTS v1.2"; textSize = 22f })
+              val keyIn = EditText(this).apply { hint = "Gemini API Key"; setText(prefs.getString("api_key","")) }
+              layout.addView(keyIn)
+              val voices = arrayOf("Kore","Aoede","Puck","Charon","Fenrir")
+              val vSpin = Spinner(this).apply {
+                adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, voices)
+                setSelection(voices.indexOf(prefs.getString("voice_name","Kore")).coerceAtLeast(0))
+              }
+              layout.addView(vSpin)
+              val models = arrayOf("gemini-3.8-flash-lite-tts","gemini-3.8-flash-tts")
+              val mSpin = Spinner(this).apply {
+                adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, models)
+                setSelection(models.indexOf(prefs.getString("model_name","gemini-3.8-flash-lite-tts")).coerceAtLeast(0))
+              }
+              layout.addView(mSpin)
+              layout.addView(Button(this).apply {
+                text = "Save Settings"
+                setOnClickListener {
+                  prefs.edit().putString("api_key", keyIn.text.toString().trim()).putString("voice_name", vSpin.selectedItem.toString()).putString("model_name", mSpin.selectedItem.toString()).apply()
+                  Toast.makeText(this@MainActivity, "Saved!", Toast.LENGTH_SHORT).show()
+                }
+              })
+              val testIn = EditText(this).apply { setText("નમસ્તે મિત્રો! आज हम चार भाषाएँ सुनेंगे। Welcome! विद्या ददाति विनयम्।") }
+              layout.addView(testIn)
+              layout.addView(Button(this).apply { text = "Test Speak Now"; setOnClickListener { tts?.speak(testIn.text.toString(), TextToSpeech.QUEUE_FLUSH, null, "t1") } })
+              layout.addView(Button(this).apply { text = "Open Default TTS Settings"; setOnClickListener { startActivity(Intent("com.android.settings.TTS_SETTINGS")) } })
+              layout.addView(TextView(this).apply { text = "Last Status: " + (prefs.getString("last_error","Ready") ?: "Ready") })
+              setContentView(ScrollView(this).apply { addView(layout) })
+              tts = TextToSpeech(this, { if (it == TextToSpeech.SUCCESS) tts?.language = Locale("gu","IN") }, packageName)
+            }
+            override fun onDestroy() { tts?.stop(); tts?.shutdown(); super.onDestroy() }
+          }
+          EOF
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemini-multilang-tts-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          
