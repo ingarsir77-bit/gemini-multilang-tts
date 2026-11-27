@@ -1,0 +1,208 @@
+name: Build Smart TTS v2.6
+on: [workflow_dispatch, push]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Create Project
+        run: |
+          mkdir -p app/src/main/java/com/ingarsir/geminitts app/src/main/res/xml
+          cat << 'EOF' > settings.gradle.kts
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
+          rootProject.name = "SmartMultiLangTTS"; include(":app")
+          EOF
+          cat << 'EOF' > gradle.properties
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          EOF
+          cat << 'EOF' > build.gradle.kts
+          plugins { id("com.android.application") version "8.5.2" apply false; id("org.jetbrains.kotlin.android") version "1.9.24" apply false }
+          EOF
+          cat << 'EOF' > app/build.gradle.kts
+          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+          android {
+            namespace = "com.ingarsir.geminitts"; compileSdk = 34
+            defaultConfig { applicationId = "com.ingarsir.geminitts"; minSdk = 24; targetSdk = 34; versionCode = 11; versionName = "2.6" }
+            compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+            kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies { implementation("androidx.core:core-ktx:1.13.1"); implementation("androidx.appcompat:appcompat:1.7.0") }
+          EOF
+          cat << 'EOF' > app/src/main/res/xml/tts_engine.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <tts-engine xmlns:android="http://schemas.android.com/apk/res/android" android:settingsActivity="com.ingarsir.geminitts.MainActivity" />
+          EOF
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.INTERNET" />
+            <application android:allowBackup="true" android:label="Smart Multi-Lang TTS" android:supportsRtl="true" android:theme="@style/Theme.AppCompat.Light.DarkActionBar">
+              <activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter></activity>
+              <activity android:name=".CheckVoiceDataActivity" android:exported="true" android:theme="@android:style/Theme.NoDisplay">
+                <intent-filter><action android:name="android.speech.tts.engine.CHECK_TTS_DATA" /><category android:name="android.intent.category.DEFAULT" /></intent-filter>
+                <intent-filter><action android:name="android.speech.tts.engine.GET_SAMPLE_TEXT" /><category android:name="android.intent.category.DEFAULT" /></intent-filter>
+              </activity>
+              <service android:name=".GeminiTtsService" android:exported="true" android:label="Smart Multi-Lang TTS">
+                <intent-filter><action android:name="android.speech.tts.TextToSpeechService" /><action android:name="android.intent.action.TTS_SERVICE" /><category android:name="android.intent.category.DEFAULT" /></intent-filter>
+                <meta-data android:name="android.speech.tts" android:resource="@xml/tts_engine" />
+              </service>
+            </application>
+          </manifest>
+          EOF
+          cat << 'EOF' > app/src/main/java/com/ingarsir/geminitts/CheckVoiceDataActivity.kt
+          package com.ingarsir.geminitts
+          import android.app.*; import android.content.*; import android.os.Bundle; import android.speech.tts.TextToSpeech
+          class CheckVoiceDataActivity : Activity() {
+            override fun onCreate(b: Bundle?) {
+              super.onCreate(b); val r = Intent()
+              if (intent?.action == TextToSpeech.Engine.ACTION_GET_SAMPLE_TEXT) {
+                val s = when ((intent.getStringExtra("language")?:"gu").lowercase()) { "gu","guj"->"નમસ્તે, આ સ્માર્ટ ટીટીએસ છે."; "hi","hin"->"नमस्ते, यह स्मार्ट टीटीएस है।"; "sa","san"->"नमस्ते, एषा वाणी अस्ति।"; else->"Hello, this is Smart TTS." }
+                r.putExtra(TextToSpeech.Engine.EXTRA_SAMPLE_TEXT, s); setResult(RESULT_OK, r)
+              } else {
+                r.putStringArrayListExtra(TextToSpeech.Engine.EXTRA_AVAILABLE_VOICES, arrayListOf("guj-IND","hin-IND","san-IND","eng-IND","eng-USA","eng-GBR"))
+                r.putStringArrayListExtra(TextToSpeech.Engine.EXTRA_UNAVAILABLE_VOICES, arrayListOf()); setResult(TextToSpeech.Engine.CHECK_VOICE_DATA_PASS, r)
+              }
+              finish()
+            }
+          }
+          EOF
+          cat << 'EOF' > app/src/main/java/com/ingarsir/geminitts/GeminiTtsService.kt
+          package com.ingarsir.geminitts
+          import android.content.Context; import android.media.AudioFormat; import android.speech.tts.*
+          import java.io.File; import java.util.Locale; import java.util.concurrent.*
+          class GeminiTtsService : TextToSpeechService() {
+            @Volatile private var isStopped = false; @Volatile private var googleReady = false
+            @Volatile private var activeLatch: CountDownLatch? = null; private var googleTts: TextToSpeech? = null
+            private val voices = listOf(Voice("smart-gu-in",Locale("gu","IN"),400,200,false,emptySet()),Voice("smart-hi-in",Locale("hi","IN"),400,200,false,emptySet()),Voice("smart-sa-in",Locale("sa","IN"),400,200,false,emptySet()),Voice("smart-en-in",Locale("en","IN"),400,200,false,emptySet()),Voice("smart-en-us",Locale.US,400,200,false,emptySet()),Voice("smart-en-gb",Locale.UK,400,200,false,emptySet()))
+            override fun onCreate() { super.onCreate(); googleTts = TextToSpeech(this, { googleReady = (it == TextToSpeech.SUCCESS) }, "com.google.android.tts") }
+            override fun onDestroy() { activeLatch?.countDown(); googleTts?.stop(); googleTts?.shutdown(); super.onDestroy() }
+            override fun onGetVoices() = voices; override fun onIsValidVoiceName(v: String?) = 0; override fun onLoadVoice(v: String?) = 0
+            override fun onGetDefaultVoiceNameFor(l: String?, c: String?, v: String?) = when (l?.lowercase()) { "gu","guj"->"smart-gu-in"; "hi","hin"->"smart-hi-in"; "sa","san"->"smart-sa-in"; else->"smart-en-in" }
+            override fun onIsLanguageAvailable(l: String?, c: String?, v: String?) = if (l?.lowercase() in listOf("gu","guj","hi","hin","sa","san","en","eng")) 2 else 0
+            override fun onGetLanguage() = arrayOf("guj","IND",""); override fun onLoadLanguage(l: String?, c: String?, v: String?) = onIsLanguageAvailable(l,c,v)
+            override fun onStop() { isStopped = true; activeLatch?.countDown(); googleTts?.stop() }
+            private fun clean(s: String) = s.replace(Regex("[,;:।॥\\-–—()\\[\\]\"'•|/]+"), " ").replace(Regex("[.]{2,}"), " ").replace(Regex("\\s+"), " ").trim()
+            private fun segs(t: String, rl: String?): List<Pair<String, String>> {
+              val o = mutableListOf<Pair<String, String>>(); var cur: String? = null; val b = StringBuilder(); val dd = if (rl?.lowercase() in listOf("sa","san")) "san" else "hin"
+              for (ch in t) {
+                val l = when { ch in '\u0A80'..'\u0AFF'->"guj"; ch in '\u0900'..'\u097F'->dd; ch in 'A'..'Z'||ch in 'a'..'z'->"eng"; else->null }
+                if (l!=null && cur!=null && l!=cur) { b.toString().trim().takeIf { it.isNotEmpty() }?.let { o.add(cur!! to it) }; b.clear(); cur=l } else if (l!=null && cur==null) cur=l
+                b.append(ch)
+              }
+              b.toString().trim().takeIf { it.isNotEmpty() }?.let { o.add((cur?:"eng") to it) }
+              return o.map { (l, s) -> if (l=="hin" && (s.contains("ः")||s.contains("ऽ")||s.contains("ॐ")||s.contains("म्"))) "san" to s else l to s }
+            }
+            private fun speakGoogle(txt: String, req: SynthesisRequest, cb: SynthesisCallback): Boolean {
+              val eng = googleTts; if (!googleReady || eng == null) return false
+              val p = getSharedPreferences("smart_tts_prefs", Context.MODE_PRIVATE)
+              val spd = (p.getFloat("speed",1f)*(req.speechRate/100f)).coerceIn(0.4f,2.5f); val pit = (p.getFloat("pitch",1f)*(req.pitch/100f)).coerceIn(0.5f,2f)
+              val allV = try { eng.voices } catch (_: Exception) { null }
+              val cleaned = clean(txt).ifEmpty { txt }; val list = segs(cleaned, req.language); if (list.isEmpty()) return false
+              var started = false
+              for ((lang, seg) in list) {
+                if (isStopped) break; val wav = File(cacheDir, "s_${System.nanoTime()}.wav")
+                try {
+                  val saved = p.getString("voice_$lang", "") ?: ""
+                  val ch = if (saved.isNotEmpty()) allV?.firstOrNull { it.name == saved } else null
+                  if (ch != null) eng.voice = ch else eng.language = when (lang) { "guj"->Locale("gu","IN"); "hin","san"->Locale("hi","IN"); else->Locale("en","IN") }
+                  eng.setSpeechRate(if (lang=="san") (spd*0.92f).coerceAtLeast(0.4f) else spd); eng.setPitch(pit)
+                  val latch = CountDownLatch(1); activeLatch = latch; var ok = false; val uid = "g_${System.nanoTime()}"
+                  eng.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(i: String?) {}; override fun onDone(i: String?) { if (i==uid) { ok=true; latch.countDown() } }; override fun onError(i: String?) { if (i==uid) latch.countDown() }
+                  })
+                  if (eng.synthesizeToFile(seg, null, wav, uid) != 0) continue
+                  latch.await(6, TimeUnit.SECONDS); activeLatch = null
+                  if (!ok || !wav.exists() || wav.length() <= 44 || isStopped) continue
+                  val b = wav.readBytes(); val sr = (b[24].toInt() and 0xFF) or ((b[25].toInt() and 0xFF) shl 8) or ((b[26].toInt() and 0xFF) shl 16) or ((b[27].toInt() and 0xFF) shl 24)
+                  var di = 44; for (i in 12 until minOf(b.size-8,256)) if (b[i]=='d'.code.toByte()&&b[i+1]=='a'.code.toByte()&&b[i+2]=='t'.code.toByte()&&b[i+3]=='a'.code.toByte()) { di=i+8; break }
+                  if (!started) { cb.start(if (sr in 8000..48000) sr else 24000, AudioFormat.ENCODING_PCM_16BIT, 1); started = true }
+                  val maxB = cb.maxBufferSize; var off = di; while (off < b.size && !isStopped) { val len = minOf(maxB, b.size-off); cb.audioAvailable(b, off, len); off += len }
+                } catch (_: Exception) {} finally { activeLatch = null; wav.delete() }
+              }
+              if (started && !isStopped) cb.done(); return started || isStopped
+            }
+            override fun onSynthesizeText(req: SynthesisRequest?, cb: SynthesisCallback?) {
+              if (req == null || cb == null) return; isStopped = false; val txt = req.charSequenceText?.toString()?.trim() ?: ""
+              if (txt.isEmpty()) { cb.start(24000, AudioFormat.ENCODING_PCM_16BIT, 1); cb.done(); return }
+              if (!speakGoogle(txt, req, cb)) cb.error()
+            }
+          }
+          EOF
+          cat << 'EOF' > app/src/main/java/com/ingarsir/geminitts/MainActivity.kt
+          package com.ingarsir.geminitts
+          import android.content.*; import android.os.Bundle; import android.speech.tts.*; import android.view.View; import android.widget.*; import androidx.appcompat.app.AppCompatActivity; import java.util.Locale
+          class MainActivity : AppCompatActivity() {
+            private var ownTts: TextToSpeech? = null; private var gTts: TextToSpeech? = null
+            private val sps = mutableMapOf<String, Spinner>(); private val vLists = mutableMapOf<String, List<Voice>>()
+            override fun onCreate(b: Bundle?) {
+              super.onCreate(b); val p = getSharedPreferences("smart_tts_prefs", Context.MODE_PRIVATE)
+              val lay = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(44,44,44,44) }
+              lay.addView(TextView(this).apply { text = "Smart Multi-Lang TTS v2.6"; textSize = 22f })
+              var spd = p.getFloat("speed",1f); var pit = p.getFloat("pitch",1f)
+              lateinit var sMin: Button; lateinit var sPlus: Button; lateinit var pMin: Button; lateinit var pPlus: Button
+              fun updSpd(a: Boolean) { val t = "%.1f".format(spd); sMin.text = "Speed - ($t)"; sPlus.text = "Speed + ($t)"; if (a) sPlus.announceForAccessibility("Speed $t") }
+              fun updPit(a: Boolean) { val t = "%.1f".format(pit); pMin.text = "Pitch - ($t)"; pPlus.text = "Pitch + ($t)"; if (a) pPlus.announceForAccessibility("Pitch $t") }
+              sMin = Button(this).apply { setOnClickListener { spd=(spd-0.1f).coerceAtLeast(0.5f); p.edit().putFloat("speed",spd).apply(); updSpd(true) } }
+              sPlus = Button(this).apply { setOnClickListener { spd=(spd+0.1f).coerceAtMost(2f); p.edit().putFloat("speed",spd).apply(); updSpd(true) } }
+              pMin = Button(this).apply { setOnClickListener { pit=(pit-0.1f).coerceAtLeast(0.5f); p.edit().putFloat("pitch",pit).apply(); updPit(true) } }
+              pPlus = Button(this).apply { setOnClickListener { pit=(pit+0.1f).coerceAtMost(2f); p.edit().putFloat("pitch",pit).apply(); updPit(true) } }
+              updSpd(false); updPit(false)
+              lay.addView(LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; addView(sMin); addView(sPlus) })
+              lay.addView(LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; addView(pMin); addView(pPlus) })
+              val samples = mapOf("guj" to "નમસ્તે, આ ગુજરાતી અવાજ છે.", "hin" to "नमस्ते, यह हिंदी आवाज़ है।", "san" to "नमस्ते, एषा संस्कृत वाणी अस्ति।", "eng" to "Hello, this is the selected English voice.")
+              for ((c, t) in listOf("guj" to "Gujarati", "hin" to "Hindi", "san" to "Sanskrit", "eng" to "English (IN/UK/US)")) {
+                lay.addView(TextView(this).apply { text = "$t Voice"; setPadding(0,12,0,2) })
+                val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                val sp = Spinner(this).apply { layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
+                sps[c] = sp; row.addView(sp)
+                row.addView(Button(this).apply { text = "Test $t"; setOnClickListener { ownTts?.speak(samples[c] ?: "Test", TextToSpeech.QUEUE_FLUSH, null, "t_$c") } })
+                lay.addView(row)
+              }
+              val tIn = EditText(this).apply { setText("નમસ્તે મિત્રો! आज हम चार भाषाएँ सुनेंगे। Welcome! विद्या ददाति विनयम्।") }; lay.addView(tIn)
+              lay.addView(Button(this).apply { text = "Test All 4 Languages"; setOnClickListener { ownTts?.speak(tIn.text.toString(), TextToSpeech.QUEUE_FLUSH, null, "t_all") } })
+              lay.addView(Button(this).apply { text = "Open Default TTS Settings"; setOnClickListener { startActivity(Intent("com.android.settings.TTS_SETTINGS")) } })
+              setContentView(ScrollView(this).apply { addView(lay) })
+              ownTts = TextToSpeech(this, { if (it==0) ownTts?.language = Locale("gu","IN") }, packageName)
+              gTts = TextToSpeech(this, { st -> if (st==0) {
+                val all = try { gTts?.voices?.toList() ?: emptyList() } catch (_: Exception) { emptyList() }
+                runOnUiThread {
+                  val f = mapOf("guj" to all.filter { it.locale.language=="gu" }, "hin" to all.filter { it.locale.language=="hi" }, "san" to all.filter { it.locale.language=="sa"||it.locale.language=="hi" }, "eng" to all.filter { it.locale.language=="en" && it.locale.country in listOf("IN","US","GB") })
+                  for ((c, l) in f) {
+                    val s = l.sortedWith(compareBy<Voice> { it.isNetworkConnectionRequired }.thenBy { it.locale.country }.thenBy { it.name }); vLists[c] = s
+                    val labels = listOf("Auto Default") + s.map { "${it.locale.displayCountry.ifEmpty { it.locale.country }} ${if (it.isNetworkConnectionRequired) "(Net)" else "(Local)"} - ${it.name}" }
+                    sps[c]?.adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, labels)
+                    val saved = p.getString("voice_$c", "") ?: ""
+                    val idx = if (saved.isEmpty()) 0 else (s.indexOfFirst { it.name == saved } + 1).coerceAtLeast(0)
+                    sps[c]?.setSelection(idx)
+                    sps[c]?.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                      override fun onItemSelected(parent: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                        val vn = if (pos == 0) "" else s.getOrNull(pos - 1)?.name ?: ""
+                        p.edit().putString("voice_$c", vn).apply()
+                      }
+                      override fun onNothingSelected(parent: AdapterView<*>?) {}
+                    }
+                  }
+                }
+              } }, "com.google.android.tts")
+            }
+            override fun onDestroy() { ownTts?.stop(); ownTts?.shutdown(); gTts?.stop(); gTts?.shutdown(); super.onDestroy() }
+          }
+          EOF
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+      - name: Publish APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v2.6
+          name: Smart Multi-Lang TTS v2.6
+          files: app/build/outputs/apk/debug/app-debug.apk
+          
